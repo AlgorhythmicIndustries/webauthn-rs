@@ -3780,6 +3780,7 @@ mod tests {
             cred_props: Some(true),
             min_pin_length: Some(true),
             hmac_create_secret: Some(true),
+            prf: None,
         };
 
         let result = wan.register_credential_internal(
@@ -3851,6 +3852,7 @@ mod tests {
             cred_props: Some(true),
             min_pin_length: None,
             hmac_create_secret: None,
+            prf: None,
         };
 
         let result = wan.register_credential_internal(

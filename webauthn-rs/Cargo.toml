@@ -14,7 +14,7 @@ homepage = { workspace = true }
 repository = { workspace = true }
 
 [package.metadata.docs.rs]
-features = ["danger-allow-state-serialisation", "danger-user-presence-only-security-keys", "danger-credential-internals"]
+features = ["danger-allow-state-serialisation", "danger-user-presence-only-security-keys", "danger-credential-internals", "prf"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
@@ -28,6 +28,13 @@ workaround-google-passkey-specific-issues = []
 danger-allow-state-serialisation = []
 danger-credential-internals = []
 danger-user-presence-only-security-keys = []
+# Enables curated registration/authentication flows that request the WebAuthn
+# PRF extension (<https://w3c.github.io/webauthn/#prf-extension>). PRF lets
+# the relying party evaluate an authenticator-held symmetric secret (CTAP
+# `hmac-secret`) to derive deterministic key material — useful for e.g. key
+# wrapping or deriving non-custodial wallet keys. Treat any PRF client output
+# as *unsigned* (see `PrfClientOutput`).
+prf = []
 
 [dependencies]
 base64urlsafedata.workspace = true

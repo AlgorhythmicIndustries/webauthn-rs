@@ -45,9 +45,7 @@ pub struct RequestAuthenticationExtensionsBuilder(RequestAuthenticationExtension
 
 impl RequestAuthenticationExtensionsBuilder {
     pub(crate) fn new() -> Self {
-        Self(RequestAuthenticationExtensions {
-            appid: None,
-        })
+        Self(RequestAuthenticationExtensions::default())
     }
 
     /// Returns the inner extensions struct
@@ -88,6 +86,11 @@ impl RequestRegistrationExtensionsBuilder {
     pub(crate) fn new() -> Self {
         Self(RequestRegistrationExtensions {
             cred_protect: None,
+            uvm: None,
+            cred_props: None,
+            min_pin_length: None,
+            hmac_create_secret: None,
+            prf: None,
         })
     }
 

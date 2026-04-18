@@ -174,11 +174,24 @@ impl Credential {
             (None, false) => ExtnState::NotRequested,
         };
 
+        // The PRF extension's authenticator-side state is carried by
+        // `hmac_create_secret` above (PRF piggybacks on CTAP `hmac-secret`).
+        // What the client reports under `prf` is always unsigned — just the
+        // browser's view of whether PRF was enabled plus any evaluation
+        // results. Store it verbatim as Unsigned, mirroring how we handle
+        // cred_props.
+        let prf = match (client_extn.prf.as_ref(), req_extn.prf.is_some()) {
+            (Some(b), _) => ExtnState::Unsigned(b.clone()),
+            (None, true) => ExtnState::Ignored,
+            (None, false) => ExtnState::NotRequested,
+        };
+
         let extensions = RegisteredExtensions {
             cred_protect,
             hmac_create_secret,
             appid,
             cred_props,
+            prf,
         };
 
         trace!(?extensions);

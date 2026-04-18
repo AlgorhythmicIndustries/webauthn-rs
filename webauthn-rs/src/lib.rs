@@ -226,6 +226,16 @@ pub mod prelude {
         COSEAlgorithm, COSEEC2Key, COSEKey, COSEKeyType, COSEKeyTypeId, COSEOKPKey, COSERSAKey,
         ECDSACurve, EDDSACurve,
     };
+    /// PRF extension types. These are always available so that stored
+    /// [`RegisteredExtensions`] payloads round-trip through serde regardless
+    /// of which features downstream crates were built with, but the
+    /// high-level flow methods
+    /// ([`Webauthn::start_passkey_prf_registration`](crate::Webauthn::start_passkey_prf_registration)
+    /// and friends) are gated behind the `prf` feature.
+    pub use webauthn_rs_core::proto::{
+        PrfClientOutput, PrfEvalResults, PrfExtension, RegisteredExtensions,
+        RequestAuthenticationExtensions, RequestRegistrationExtensions,
+    };
 }
 
 /// The [Webauthn recommended authenticator interaction timeout][0].
@@ -552,6 +562,7 @@ impl Webauthn {
             cred_props: Some(true),
             min_pin_length: None,
             hmac_create_secret: None,
+            prf: None,
         });
 
         let builder = self
@@ -609,6 +620,7 @@ impl Webauthn {
             cred_props: Some(true),
             min_pin_length: None,
             hmac_create_secret: None,
+            prf: None,
         });
 
         let builder = self
@@ -719,6 +731,158 @@ impl Webauthn {
         state: &PasskeyAuthentication,
     ) -> WebauthnResult<AuthenticationResult> {
         self.core.authenticate_credential(reg, &state.ast)
+    }
+
+    /// Initiate the registration of a new passkey with the PRF extension
+    /// requested.
+    ///
+    /// This is an opinionated wrapper around
+    /// [`start_passkey_registration`](Webauthn::start_passkey_registration)
+    /// that additionally asks the authenticator to provision a PRF
+    /// (pseudo-random function) seed on this credential. PRF piggy-backs on
+    /// the CTAP `hmac-secret` extension, so `hmacCreateSecret` is set to
+    /// `true` here as well — without it, browsers will refuse to route the
+    /// PRF extension to compatible authenticators.
+    ///
+    /// `prf_eval` is optional: pass `Some(_)` if you want the browser to try
+    /// to evaluate the PRF *during* registration (Chrome ≥ 116 supports
+    /// this). If the authenticator doesn't support in-registration
+    /// evaluation, the client will simply return `{ "enabled": true }`
+    /// instead, and the caller can evaluate again during the next
+    /// authentication ceremony.
+    ///
+    /// On success, the returned [`Passkey`] / [`PasskeyRegistration`] pair
+    /// can be stored and used with [`finish_passkey_registration`](Webauthn::finish_passkey_registration)
+    /// exactly like the non-PRF variant — the PRF state travels on the
+    /// resulting `RegisteredExtensions::prf` field. ⚠️  That state is
+    /// always unsigned — verify any derived material via a subsequent
+    /// authentication ceremony before relying on it for security.
+    ///
+    /// <https://w3c.github.io/webauthn/#prf-extension>
+    #[cfg(any(all(doc, not(doctest)), feature = "prf"))]
+    pub fn start_passkey_prf_registration(
+        &self,
+        user_unique_id: Uuid,
+        user_name: &str,
+        user_display_name: &str,
+        exclude_credentials: Option<Vec<CredentialID>>,
+        prf_eval: Option<PrfEvalResults>,
+    ) -> WebauthnResult<(CreationChallengeResponse, PasskeyRegistration)> {
+        let extensions = Some(RequestRegistrationExtensions {
+            cred_protect: Some(CredProtect {
+                credential_protection_policy: CredentialProtectionPolicy::UserVerificationRequired,
+                enforce_credential_protection_policy: Some(false),
+            }),
+            uvm: Some(true),
+            cred_props: Some(true),
+            min_pin_length: None,
+            // PRF is delivered to the authenticator via the CTAP hmac-secret
+            // extension — without this, the browser will not route the PRF
+            // request through, and registration will silently succeed
+            // without a usable secret.
+            hmac_create_secret: Some(true),
+            prf: Some(PrfExtension { eval: prf_eval }),
+        });
+
+        let builder = self
+            .core
+            .new_challenge_register_builder(
+                user_unique_id.as_bytes(),
+                user_name,
+                user_display_name,
+            )?
+            .attestation(AttestationConveyancePreference::None)
+            .credential_algorithms(self.algorithms.clone())
+            .require_resident_key(false)
+            .authenticator_attachment(None)
+            .user_verification_policy(UserVerificationPolicy::Required)
+            .reject_synchronised_authenticators(false)
+            .exclude_credentials(exclude_credentials)
+            .hints(None)
+            .extensions(extensions);
+
+        self.core
+            .generate_challenge_register(builder)
+            .map(|(ccr, rs)| (ccr, PasskeyRegistration { rs }))
+    }
+
+    /// Complete a PRF-enabled passkey registration. Functionally identical to
+    /// [`finish_passkey_registration`](Webauthn::finish_passkey_registration)
+    /// — a separate method is provided only so downstream call-sites can
+    /// be read as a coherent pair with
+    /// [`start_passkey_prf_registration`](Webauthn::start_passkey_prf_registration).
+    ///
+    /// Any PRF client output reported by the browser will be available on the
+    /// returned [`Passkey`]'s `extensions.prf` field (as
+    /// [`ExtnState::Unsigned`]).
+    #[cfg(any(all(doc, not(doctest)), feature = "prf"))]
+    pub fn finish_passkey_prf_registration(
+        &self,
+        reg: &RegisterPublicKeyCredential,
+        state: &PasskeyRegistration,
+    ) -> WebauthnResult<Passkey> {
+        self.finish_passkey_registration(reg, state)
+    }
+
+    /// Begin authentication of one or more passkeys, asking the browser to
+    /// evaluate the PRF extension with the supplied salts.
+    ///
+    /// The client will return the PRF outputs under
+    /// `clientExtensionResults.prf.results` on the resulting
+    /// [`PublicKeyCredential`]. Because the PRF output is not covered by the
+    /// authenticator signature, callers that rely on it for key derivation
+    /// **must** also validate that the credential was registered with PRF
+    /// enabled (check `RegisteredExtensions::hmac_create_secret` on the
+    /// stored [`Passkey`]).
+    ///
+    /// <https://w3c.github.io/webauthn/#prf-extension>
+    #[cfg(any(all(doc, not(doctest)), feature = "prf"))]
+    pub fn start_passkey_prf_authentication(
+        &self,
+        creds: &[Passkey],
+        prf_eval: PrfEvalResults,
+    ) -> WebauthnResult<(RequestChallengeResponse, PasskeyAuthentication)> {
+        let extensions = Some(RequestAuthenticationExtensions {
+            appid: None,
+            uvm: None,
+            hmac_get_secret: None,
+            prf: Some(PrfExtension {
+                eval: Some(prf_eval),
+            }),
+        });
+        let creds = creds.iter().map(|sk| sk.cred.clone()).collect();
+        let policy = Some(UserVerificationPolicy::Required);
+        let allow_backup_eligible_upgrade = true;
+        let hints = None;
+
+        self.core
+            .new_challenge_authenticate_builder(creds, policy)
+            .map(|builder| {
+                builder
+                    .extensions(extensions)
+                    .allow_backup_eligible_upgrade(allow_backup_eligible_upgrade)
+                    .hints(hints)
+            })
+            .and_then(|b| self.core.generate_challenge_authenticate(b))
+            .map(|(rcr, ast)| (rcr, PasskeyAuthentication { ast }))
+    }
+
+    /// Complete a PRF-enabled passkey authentication. Functionally identical
+    /// to [`finish_passkey_authentication`](Webauthn::finish_passkey_authentication)
+    /// — the companion to
+    /// [`start_passkey_prf_authentication`](Webauthn::start_passkey_prf_authentication).
+    ///
+    /// The PRF evaluation results themselves are **not** returned through
+    /// this function — the authenticator signature doesn't cover them, so
+    /// they're left on the raw client payload for the caller to extract
+    /// (see `clientExtensionResults.prf.results` in the browser response).
+    #[cfg(any(all(doc, not(doctest)), feature = "prf"))]
+    pub fn finish_passkey_prf_authentication(
+        &self,
+        reg: &PublicKeyCredential,
+        state: &PasskeyAuthentication,
+    ) -> WebauthnResult<AuthenticationResult> {
+        self.finish_passkey_authentication(reg, state)
     }
 
     /// Initiate the registration of a new security key for a user. A security key is any cryptographic
@@ -871,6 +1035,7 @@ impl Webauthn {
             cred_props: Some(true),
             min_pin_length: None,
             hmac_create_secret: None,
+            prf: None,
         });
 
         let policy = if self.user_presence_only_security_keys {
@@ -1165,6 +1330,7 @@ impl Webauthn {
             // https://fidoalliance.org/specs/fido-v2.1-rd-20210309/fido-client-to-authenticator-protocol-v2.1-rd-20210309.html#sctn-minpinlength-extension
             min_pin_length: Some(true),
             hmac_create_secret: Some(true),
+            prf: None,
         });
 
         let builder = self
@@ -1255,6 +1421,7 @@ impl Webauthn {
             appid: None,
             uvm: Some(true),
             hmac_get_secret: None,
+            prf: None,
         });
 
         let policy = Some(UserVerificationPolicy::Required);
@@ -1322,6 +1489,7 @@ impl Webauthn {
             appid: None,
             uvm: Some(true),
             hmac_get_secret: None,
+            prf: None,
         });
         let allow_backup_eligible_upgrade = false;
         let hints = None;
@@ -1425,6 +1593,7 @@ impl Webauthn {
             // https://fidoalliance.org/specs/fido-v2.1-rd-20210309/fido-client-to-authenticator-protocol-v2.1-rd-20210309.html#sctn-minpinlength-extension
             min_pin_length: Some(true),
             hmac_create_secret: Some(true),
+            prf: None,
         });
 
         let builder = self
@@ -1499,6 +1668,7 @@ impl Webauthn {
             appid: None,
             uvm: Some(true),
             hmac_get_secret: None,
+            prf: None,
         });
 
         let policy = Some(UserVerificationPolicy::Required);
