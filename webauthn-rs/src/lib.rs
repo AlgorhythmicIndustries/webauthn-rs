@@ -758,6 +758,15 @@ impl Webauthn {
     /// always unsigned — verify any derived material via a subsequent
     /// authentication ceremony before relying on it for security.
     ///
+    /// Unlike [`start_passkey_registration`](Webauthn::start_passkey_registration),
+    /// this helper requests `residentKey: "required"`. PRF-derived key
+    /// material is only useful if the credential can be rediscovered by
+    /// the authenticator during a usernameless / discoverable
+    /// authentication ceremony, so we make that a precondition of
+    /// registration. Authenticators that cannot store a discoverable
+    /// credential (older roaming keys, constrained platform stores)
+    /// will refuse registration rather than silently downgrading.
+    ///
     /// <https://w3c.github.io/webauthn/#prf-extension>
     #[cfg(any(all(doc, not(doctest)), feature = "prf"))]
     pub fn start_passkey_prf_registration(
@@ -793,7 +802,7 @@ impl Webauthn {
             )?
             .attestation(AttestationConveyancePreference::None)
             .credential_algorithms(self.algorithms.clone())
-            .require_resident_key(false)
+            .require_resident_key(true)
             .authenticator_attachment(None)
             .user_verification_policy(UserVerificationPolicy::Required)
             .reject_synchronised_authenticators(false)
@@ -1844,6 +1853,47 @@ mod tests {
         };
         let (_rcr, mut state) = webauthn.start_discoverable_passkey_prf_authentication(prf_eval)?;
         state.set_allowed_passkeys(&[]);
+        Ok(())
+    }
+
+    #[cfg(feature = "prf")]
+    #[test]
+    /// PRF-enabled registration must request `residentKey: required` so the
+    /// credential is discoverable on the authenticator — otherwise the PRF
+    /// secret is useless for the usernameless flows that motivate this
+    /// helper.
+    fn test_start_passkey_prf_registration_requires_resident_key(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use crate::prelude::*;
+        use webauthn_rs_core::proto::ResidentKeyRequirement;
+
+        let rp_id = "example.com";
+        let rp_origin = Url::parse("https://idm.example.com")?;
+        let webauthn = WebauthnBuilder::new(rp_id, &rp_origin)?.build()?;
+
+        let user_id = Uuid::new_v4();
+        let (ccr, _state) = webauthn.start_passkey_prf_registration(
+            user_id,
+            "alice",
+            "Alice Example",
+            None,
+            None,
+        )?;
+
+        let sel = ccr
+            .public_key
+            .authenticator_selection
+            .as_ref()
+            .expect("authenticator_selection must be present");
+        assert_eq!(
+            sel.resident_key,
+            Some(ResidentKeyRequirement::Required),
+            "PRF registration must request residentKey: required"
+        );
+        assert!(
+            sel.require_resident_key,
+            "legacy requireResidentKey must also be set for older clients"
+        );
         Ok(())
     }
 }
