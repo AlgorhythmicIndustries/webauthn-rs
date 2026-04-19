@@ -44,6 +44,30 @@ pub struct PasskeyAuthentication {
     pub(crate) ast: AuthenticationState,
 }
 
+impl PasskeyAuthentication {
+    /// Replace the set of credentials this in-progress authentication will
+    /// accept. Intended for resident / discoverable credential flows where
+    /// the relying party starts the ceremony without knowing which
+    /// credential the client will use (empty `allowCredentials`) and
+    /// resolves the matching [`Passkey`] out-of-band from the returned
+    /// `rawId` (and optionally `userHandle`) before calling
+    /// [`finish_passkey_authentication`](crate::Webauthn::finish_passkey_authentication).
+    ///
+    /// Typical use: pass **exactly one** [`Passkey`] — the DB row whose
+    /// `credential_id` matches the client assertion's `rawId`. Injecting
+    /// credentials that were not bound to the pending ceremony will either
+    /// fail verification (best case) or, if driven from attacker-controlled
+    /// input, silently verify against the wrong credential. Callers are
+    /// responsible for that binding.
+    ///
+    /// This is a thin wrapper around
+    /// [`AuthenticationState::set_allowed_credentials`](webauthn_rs_core::proto::AuthenticationState::set_allowed_credentials).
+    pub fn set_allowed_passkeys(&mut self, passkeys: &[Passkey]) {
+        let creds: Vec<Credential> = passkeys.iter().map(|p| p.cred.clone()).collect();
+        self.ast.set_allowed_credentials(creds);
+    }
+}
+
 /// A Passkey for a user. A passkey is a term that covers all possible authenticators that may exist.
 /// These could be roaming credentials such as Apple's Account back passkeys, they could be a users
 /// Yubikey, a Windows Hello TPM, or even a password manager softtoken.

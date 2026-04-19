@@ -885,6 +885,75 @@ impl Webauthn {
         self.finish_passkey_authentication(reg, state)
     }
 
+    /// Begin a *discoverable* (resident-credential) passkey authentication
+    /// with the PRF extension requested.
+    ///
+    /// Functionally the usernameless / resident-key sibling of
+    /// [`start_passkey_prf_authentication`](Webauthn::start_passkey_prf_authentication):
+    /// the outbound `publicKey.allowCredentials` list is **empty**, so the
+    /// authenticator picks which stored credential to use locally and the
+    /// relying party learns the credential's `rawId` (and optionally
+    /// `userHandle`) only from the finish-time client assertion.
+    ///
+    /// The returned [`PasskeyAuthentication`] starts with zero stored
+    /// credentials, so
+    /// [`finish_passkey_authentication`](Webauthn::finish_passkey_authentication)
+    /// (or [`finish_passkey_prf_authentication`](Webauthn::finish_passkey_prf_authentication))
+    /// will fail until the application resolves the matching [`Passkey`]
+    /// from its own storage and injects it via
+    /// [`PasskeyAuthentication::set_allowed_passkeys`]. Typical backend
+    /// flow:
+    ///
+    /// 1. `start_discoverable_passkey_prf_authentication(prf_eval)` → store `state`.
+    /// 2. Client evaluates PRF and returns a [`PublicKeyCredential`].
+    /// 3. Look up the `Passkey` in your DB by `PublicKeyCredential::get_credential_id()`
+    ///    (cross-check `userHandle` if you rely on it).
+    /// 4. `state.set_allowed_passkeys(&[passkey]);`
+    /// 5. `finish_passkey_prf_authentication(&assertion, &state)`.
+    ///
+    /// Unlike [`start_discoverable_authentication`](Webauthn::start_discoverable_authentication)
+    /// (which is conditional-UI only and strips PRF), this entry point
+    /// leaves `mediation` unset so the browser presents a normal modal
+    /// passkey ceremony, and threads the caller-supplied PRF salts through
+    /// the extensions builder the same way `start_passkey_prf_authentication`
+    /// does.
+    ///
+    /// The PRF output is **not** covered by the authenticator signature —
+    /// callers that derive key material from it must also verify that the
+    /// resolved credential was registered with PRF enabled (check
+    /// `RegisteredExtensions::hmac_create_secret` on the stored
+    /// [`Passkey`]).
+    ///
+    /// <https://w3c.github.io/webauthn/#prf-extension>
+    #[cfg(any(all(doc, not(doctest)), feature = "prf"))]
+    pub fn start_discoverable_passkey_prf_authentication(
+        &self,
+        prf_eval: PrfEvalResults,
+    ) -> WebauthnResult<(RequestChallengeResponse, PasskeyAuthentication)> {
+        let extensions = Some(RequestAuthenticationExtensions {
+            appid: None,
+            uvm: None,
+            hmac_get_secret: None,
+            prf: Some(PrfExtension {
+                eval: Some(prf_eval),
+            }),
+        });
+        let policy = Some(UserVerificationPolicy::Required);
+        let allow_backup_eligible_upgrade = true;
+        let hints = None;
+
+        self.core
+            .new_challenge_authenticate_builder(Vec::with_capacity(0), policy)
+            .map(|builder| {
+                builder
+                    .extensions(extensions)
+                    .allow_backup_eligible_upgrade(allow_backup_eligible_upgrade)
+                    .hints(hints)
+            })
+            .and_then(|b| self.core.generate_challenge_authenticate(b))
+            .map(|(rcr, ast)| (rcr, PasskeyAuthentication { ast }))
+    }
+
     /// Initiate the registration of a new security key for a user. A security key is any cryptographic
     /// authenticator acting as a single factor of authentication to supplement a password or some
     /// other authentication factor.
@@ -1714,6 +1783,67 @@ mod tests {
         eprintln!("rp_id: {:?}", builder.rp_id);
         let built = builder.build()?;
         eprintln!("rp_name: {}", built.core.rp_name());
+        Ok(())
+    }
+
+    #[cfg(feature = "prf")]
+    #[test]
+    /// Discoverable + PRF start: assert the outbound challenge has an empty
+    /// `allowCredentials` list, carries the requested PRF salts, and does
+    /// **not** force conditional UI mediation (unlike
+    /// `start_discoverable_authentication`).
+    fn test_start_discoverable_passkey_prf_authentication() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use crate::prelude::*;
+
+        let rp_id = "example.com";
+        let rp_origin = Url::parse("https://idm.example.com")?;
+        let webauthn = WebauthnBuilder::new(rp_id, &rp_origin)?.build()?;
+
+        let prf_eval = PrfEvalResults {
+            first: b"test-salt".to_vec().into(),
+            second: None,
+        };
+        let (rcr, _state) = webauthn.start_discoverable_passkey_prf_authentication(prf_eval)?;
+
+        assert!(
+            rcr.public_key.allow_credentials.is_empty(),
+            "discoverable start must produce empty allowCredentials"
+        );
+        assert!(
+            rcr.mediation.is_none(),
+            "discoverable + PRF must not force conditional mediation"
+        );
+        let exts = rcr
+            .public_key
+            .extensions
+            .as_ref()
+            .expect("extensions should be set");
+        let prf = exts.prf.as_ref().expect("PRF extension must be present");
+        let eval = prf.eval.as_ref().expect("PRF eval must be populated");
+        assert_eq!(eval.first.as_slice(), b"test-salt");
+        assert!(eval.second.is_none());
+        Ok(())
+    }
+
+    #[cfg(feature = "prf")]
+    #[test]
+    /// `set_allowed_passkeys` on a freshly-started discoverable authentication
+    /// should be a no-op observable at the wire layer (only affects finish
+    /// verification), but it must not panic and must accept an empty slice.
+    fn test_set_allowed_passkeys_empty_is_ok() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::prelude::*;
+
+        let rp_id = "example.com";
+        let rp_origin = Url::parse("https://idm.example.com")?;
+        let webauthn = WebauthnBuilder::new(rp_id, &rp_origin)?.build()?;
+
+        let prf_eval = PrfEvalResults {
+            first: b"salt".to_vec().into(),
+            second: None,
+        };
+        let (_rcr, mut state) = webauthn.start_discoverable_passkey_prf_authentication(prf_eval)?;
+        state.set_allowed_passkeys(&[]);
         Ok(())
     }
 }
